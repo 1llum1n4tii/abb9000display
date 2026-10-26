@@ -1,76 +1,70 @@
-AliBarBarIngot9000 LCD Rpi Driver
+ABB9000 Display
 
-Raspberry Pi GPIO driver for a multiplexed display, with command-line control, segment testing, and animations.
+Raspberry Pi GPIO driver for the multiplexed LCD display from an ALIBARBAR 9000 INGOT battery and liquid display.
 
+Features:
+
+Digit and symbol display control
+Segment testing and animations
+Process management with graceful GPIO cleanup
+ntfy.sh notification triggers with configurable commands and delayed actions
+Per-user systemd service for background notifications
 Requirements
 Raspberry Pi with GPIO support
 Python 3 and RPi.GPIO
-Zsh for the command-line wrapper
+Zsh for the display wrappers
+Bash and systemd for installation and service management
+Network access for ntfy notifications
+Installation
 
-Make the wrapper executable:
+Run the interactive installer from the repository root:
 
 bash
-chmod +x display.zsh
+chmod +x install.sh
+./install.sh
 
-Scripts
-Script	Purpose
-display.py	Continuously display a digit and optional symbol
-display.zsh	Start, replace, and stop display processes
-test_segment.py	Test an individual display component
-test_segments.py	Test all 19 components sequentially
-displaypattern.py	Run display animations
-Display Driver
+
+Choose Install to install the commands, Python scripts, notification configuration, and systemd user service.
+
+Installed files are placed in ~/.local/bin/, with the service at ~/.config/systemd/user/display-notifications.service.
+
+Choose Uninstall to stop and disable the notification service and remove the installed application files. Configuration and notification state can optionally be preserved.
+
+Display driver
 
 Display a digit continuously:
 
 bash
-./display.zsh --khz 120 --symbol NONE --digit 3
+display --digit 3 --symbol NONE
 
 
 Display a digit with a symbol:
 
 bash
-./display.zsh --digit 8 --symbol LIGHTNING
-./display.zsh --digit 5 --symbol PERCENT
-./display.zsh --digit 2 --symbol DROP_TOP
-./display.zsh --digit 2 --symbol DROP_MIDDLE
-./display.zsh --digit 2 --symbol DROP_BOTTOM
+display --digit 8 --symbol LIGHTNING
+display --digit 5 --symbol PERCENT
+display --digit 2 --symbol DROP_TOP
+display --digit 2 --symbol DROP_MIDDLE
+display --digit 2 --symbol DROP_BOTTOM
 
 
 Select the digit position:
 
 bash
-./display.zsh --digit 3 --side LEFT
-./display.zsh --digit 3 --side RIGHT
+display --digit 3 --side LEFT
+display --digit 3 --side RIGHT
 
-Driver arguments
-Argument	Default	Description
---digit	Required	Digit 0–9
---symbol	NONE	NONE, LIGHTNING, PERCENT, DROP_TOP, DROP_MIDDLE, DROP_BOTTOM
---khz	120	Refresh rate in Hz; despite the option name
---side	LEFT	LEFT or RIGHT
-Segment Testing
-
-Test one component continuously:
-
-bash
-python3 test_segment.py --segment L_a --hz 120
-python3 test_segment.py --segment R_g --hz 60
-python3 test_segment.py --segment LIGHTNING --hz 120
-python3 test_segment.py --segment DROP_BOTTOM --hz 120
-
-
-Test all 19 components sequentially for one second each:
-
-bash
-python3 test_segments.py
-
+Argument	Description
+--digit	Required digit, 0–9
+--symbol	NONE, LIGHTNING, PERCENT, DROP_TOP, DROP_MIDDLE, DROP_BOTTOM
+--side	LEFT or RIGHT
+--khz	Refresh rate in Hz, despite the option name
 Animations
 
 Run an animation continuously:
 
 bash
-python3 displaypattern.py --animation chase --hz 120
+display-pattern --animation chase --hz 120
 
 
 Available animations:
@@ -79,46 +73,120 @@ Animation	Description
 chase	Lights each component in sequence
 fill	Builds and clears the left digit
 bounce	Moves a lit component back and forth
-count	Counts from 0 to 9 on the left digit
+count	Counts from 0 to 9
 symbols	Cycles through lightning, percent, and water-drop components
 
 Examples:
 
 bash
-python3 displaypattern.py --animation fill --hz 10
-python3 displaypattern.py --animation bounce --hz 20
-python3 displaypattern.py --animation count --hz 2
-python3 displaypattern.py --animation symbols --hz 2
+display-pattern --animation fill --hz 10
+display-pattern --animation bounce --hz 20
+display-pattern --animation count --hz 2
+display-pattern --animation symbols --hz 2
 
-Process Management
+Process management
 
-Starting a new configuration automatically stops existing Python processes
-matching the relevant driver script.
+Starting a new configuration automatically stops existing processes belonging to the same driver.
 
-Stop all display processes:
+Stop all matching display processes:
 
-```bash
-./display --killall
-```
+bash
+display --killall
 
-Stop all animation processes:
 
-```bash
-./display-pattern --killall
-```
+Stop all matching animation processes:
 
-Both commands send SIGINT to every matching process and wait up to five
-seconds per process for graceful GPIO cleanup. They attempt to stop all
-matching processes even if one fails to exit, and return an error if any
-process fails to stop.
+bash
+display-pattern --killall
 
-Press Ctrl+C to stop scripts running in the foreground.
 
-GPIO Mapping
+The --killall option should find every matching process, send SIGINT to allow Python's cleanup handlers to run, and attempt to stop all matches even if one fails.
 
-The scripts use BCM numbering.
+Press Ctrl+C to stop foreground scripts. Avoid kill -9, which prevents normal GPIO cleanup.
 
-Pin ID	BCM GPIO	Physical pin
+Segment testing
+
+Test one component continuously:
+
+bash
+python3 ~/.local/bin/test_segment.py --segment L_a --hz 120
+python3 ~/.local/bin/test_segment.py --segment R_g --hz 60
+python3 ~/.local/bin/test_segment.py --segment LIGHTNING --hz 120
+python3 ~/.local/bin/test_segment.py --segment DROP_BOTTOM --hz 120
+
+
+Test all 19 components sequentially:
+
+bash
+python3 ~/.local/bin/test_segments.py
+
+Notification worker
+
+display-notifications.py polls configured ntfy.sh topics every five seconds and runs commands when new notifications arrive.
+
+Configuration:
+
+bash
+nano ~/.local/bin/display-notifications.json
+
+
+Example:
+
+json
+{
+  "base_url": "https://ntfy.sh",
+  "poll_interval_seconds": 5,
+  "request_timeout_seconds": 10,
+  "state_file": "display-notifications-state.json",
+  "topics": [
+    {
+      "topic": "your-topic-name",
+      "on_message": [
+        ["/home/pi/.local/bin/display-pattern", "--animation", "chase"]
+      ],
+      "delayed_policy": "reset",
+      "delayed_actions": [
+        {
+          "delay_seconds": 60,
+          "command": [
+            "/home/pi/.local/bin/display-pattern",
+            "--killall"
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+
+Replace your-topic-name with your actual topic. Update command paths for your user and configuration.
+
+on_message: commands executed when a notification arrives.
+delayed_actions: commands scheduled after a delay.
+reset: a new notification resets the pending timer for that action.
+parallel: each notification schedules its own delayed action.
+
+Notification fields are available to commands through environment variables, including NTFY_MESSAGE, NTFY_TITLE, NTFY_TOPIC, and NTFY_ID.
+
+The example starts an animation when a notification arrives and stops it 60 seconds after the most recent notification.
+
+Service management
+bash
+systemctl --user status display-notifications.service
+systemctl --user restart display-notifications.service
+systemctl --user stop display-notifications.service
+journalctl --user -u display-notifications.service -f
+
+
+The installer enables and starts the service. After editing the configuration, restart it to apply changes.
+
+The worker starts with an empty topic list until configured. Notification timers are held in memory and are lost if the worker restarts.
+
+GPIO mapping
+
+BCM numbering is used.
+
+Component	BCM GPIO	Physical pin
 1	17	11
 2	27	13
 3	22	15
@@ -126,18 +194,16 @@ Pin ID	BCM GPIO	Physical pin
 5	24	18
 6	25	22
 
-Component pin pairs are defined in display.py and reused by the test and animation scripts.
+Component pin pairs are defined in display.py and reused by the testing and animation scripts.
 
-Logging
+Logging and safety
 
-The wrapper redirects Python output to /tmp/display.log.
+The display wrapper writes Python output to /tmp/display.log:
 
 bash
 tail -f /tmp/display.log
 
-Notes
-All continuous scripts stop with Ctrl+C and clean up GPIO on graceful exit.
---khz 120 means 120 Hz, not 120 kHz.
---hz controls the timing used by the segment tester and animation runner; it does not guarantee precise hardware timing.
-Some simultaneous component combinations can conflict because they share GPIO pins.
-Use appropriate current limiting and ensure the circuit is safe for Raspberry Pi GPIO.
+
+Continuous scripts should turn the display components off and release GPIO resources during graceful shutdown. Physical LEDs may still be affected by circuit design or electrical faults.
+
+Use appropriate current limiting and protect Raspberry Pi GPIO pins from unsafe voltages. Keep notification topics and command configuration restricted to trusted users.
