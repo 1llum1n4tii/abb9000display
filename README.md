@@ -1,20 +1,27 @@
 AliBarBarIngot9000 LCD Rpi Driver
 
-Raspberry Pi GPIO driver for a multiplexed display. Continuously displays a digit and optional symbol until stopped. Use display.zsh to start, replace, or stop display processes.
+Raspberry Pi GPIO driver for a multiplexed display, with command-line control, segment testing, and animations.
 
 Requirements
 Raspberry Pi with GPIO support
 Python 3 and RPi.GPIO
-Zsh
+Zsh for the command-line wrapper
 
 Make the wrapper executable:
 
 bash
 chmod +x display.zsh
 
-Usage
+Scripts
+Script	Purpose
+display.py	Continuously display a digit and optional symbol
+display.zsh	Start, replace, and stop display processes
+test_segment.py	Test an individual display component
+test_segments.py	Test all 19 components sequentially
+displaypattern.py	Run display animations
+Display Driver
 
-Start a display:
+Display a digit continuously:
 
 bash
 ./display.zsh --khz 120 --symbol NONE --digit 3
@@ -23,27 +30,71 @@ bash
 Display a digit with a symbol:
 
 bash
-./display.zsh --khz 120 --symbol LIGHTNING --digit 8
-./display.zsh --symbol PERCENT --digit 5
-./display.zsh --symbol DROP_TOP --digit 2
+./display.zsh --digit 8 --symbol LIGHTNING
+./display.zsh --digit 5 --symbol PERCENT
+./display.zsh --digit 2 --symbol DROP_TOP
+./display.zsh --digit 2 --symbol DROP_MIDDLE
+./display.zsh --digit 2 --symbol DROP_BOTTOM
 
 
-Select the right-hand digit:
+Select the digit position:
 
 bash
+./display.zsh --digit 3 --side LEFT
 ./display.zsh --digit 3 --side RIGHT
 
-Arguments
+Driver arguments
 Argument	Default	Description
---digit	Required	Digit from 0 to 9
+--digit	Required	Digit 0–9
 --symbol	NONE	NONE, LIGHTNING, PERCENT, DROP_TOP, DROP_MIDDLE, DROP_BOTTOM
---khz	120	Refresh rate in Hz, despite the option name
+--khz	120	Refresh rate in Hz; despite the option name
 --side	LEFT	LEFT or RIGHT
+Segment Testing
+
+Test one component continuously:
+
+bash
+python3 test_segment.py --segment L_a --hz 120
+python3 test_segment.py --segment R_g --hz 60
+python3 test_segment.py --segment LIGHTNING --hz 120
+python3 test_segment.py --segment DROP_BOTTOM --hz 120
+
+
+Test all 19 components sequentially for one second each:
+
+bash
+python3 test_segments.py
+
+Animations
+
+Run an animation continuously:
+
+bash
+python3 displaypattern.py --animation chase --hz 120
+
+
+Available animations:
+
+Animation	Description
+chase	Lights each component in sequence
+fill	Builds and clears the left digit
+bounce	Moves a lit component back and forth
+count	Counts from 0 to 9 on the left digit
+symbols	Cycles through lightning, percent, and water-drop components
+
+Examples:
+
+bash
+python3 displaypattern.py --animation fill --hz 10
+python3 displaypattern.py --animation bounce --hz 20
+python3 displaypattern.py --animation count --hz 2
+python3 displaypattern.py --animation symbols --hz 2
+
 Process Management
 
-Starting a new configuration automatically stops existing Python processes matching display.py.
+Starting a new configuration with display.zsh automatically stops existing Python processes matching display.py.
 
-Capture the PID:
+Capture the new process ID:
 
 bash
 PID=$(./display.zsh --digit 3)
@@ -56,33 +107,34 @@ bash
 ./display.zsh --killpid "$PID"
 
 
-Stop a directly running Python display with Ctrl+C.
+Press Ctrl+C to stop scripts running in the foreground.
 
 The wrapper uses SIGTERM and waits for graceful shutdown. Avoid kill -9, which prevents GPIO cleanup.
 
 GPIO Mapping
 
-GPIO numbering uses BCM mode.
+The scripts use BCM numbering.
 
-Pin ID	BCM GPIO
-1	17
-2	27
-3	22
-4	23
-5	24
-6	25
+Pin ID	BCM GPIO	Physical pin
+1	17	11
+2	27	13
+3	22	15
+4	23	16
+5	24	18
+6	25	22
 
-Components are defined by pin pairs in display.py. Each pair is driven LOW/HIGH to activate its component.
+Component pin pairs are defined in display.py and reused by the test and animation scripts.
 
 Logging
 
-Python output is written to /tmp/display.log.
+The wrapper redirects Python output to /tmp/display.log.
 
 bash
 tail -f /tmp/display.log
 
 Notes
-The display runs continuously until terminated.
+All continuous scripts stop with Ctrl+C and clean up GPIO on graceful exit.
 --khz 120 means 120 Hz, not 120 kHz.
-GPIO cleanup runs on graceful shutdown, but is not guaranteed after SIGKILL or power loss.
-Ensure the circuit uses appropriate current limiting and is electrically safe for Raspberry Pi GPIO.
+--hz controls the timing used by the segment tester and animation runner; it does not guarantee precise hardware timing.
+Some simultaneous component combinations can conflict because they share GPIO pins.
+Use appropriate current limiting and ensure the circuit is safe for Raspberry Pi GPIO.
