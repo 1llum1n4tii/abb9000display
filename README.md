@@ -92,24 +92,27 @@ python3 displaypattern.py --animation symbols --hz 2
 
 Process Management
 
-Starting a new configuration with display.zsh automatically stops existing Python processes matching display.py.
+Starting a new configuration automatically stops existing Python processes
+matching the relevant driver script.
 
-Capture the new process ID:
+Stop all display processes:
 
-bash
-PID=$(./display.zsh --digit 3)
-echo "$PID"
+```bash
+./display --killall
+```
 
+Stop all animation processes:
 
-Stop a specific display process:
+```bash
+./display-pattern --killall
+```
 
-bash
-./display.zsh --killpid "$PID"
-
+Both commands send SIGINT to every matching process and wait up to five
+seconds per process for graceful GPIO cleanup. They attempt to stop all
+matching processes even if one fails to exit, and return an error if any
+process fails to stop.
 
 Press Ctrl+C to stop scripts running in the foreground.
-
-The wrapper uses SIGTERM and waits for graceful shutdown. Avoid kill -9, which prevents GPIO cleanup.
 
 GPIO Mapping
 
