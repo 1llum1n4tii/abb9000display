@@ -79,14 +79,14 @@ PY
 }
 
 install_app() {
-    local source_dir file python_bin
+    local source_dir python_bin file answer
+    local existing=0 keep_config=0 was_active=0
+    local backup_dir stage unit_stage
+    local had_unit=0
 
     source_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
     python_bin="$(command -v python3)" ||
         die "Python 3 is required."
-
-    [[ -f "$source_dir/display-notifications.py" ]] ||
-        die "Run this installer from the repository containing display-notifications.py."
 
     for file in "${FILES[@]}"; do
         [[ -f "$source_dir/$file" ]] ||
@@ -96,47 +96,73 @@ install_app() {
     require_systemd
     mkdir -p "$BIN_DIR" "$UNIT_DIR"
 
-    # Do not silently overwrite unrelated commands in ~/.local/bin.
-    local conflicts=()
     for file in "${FILES[@]}"; do
-        [[ -e "$BIN_DIR/$file" ]] && conflicts+=("$BIN_DIR/$file")
+        [[ ! -e "$BIN_DIR/$file" ]] || existing=1
     done
+    [[ ! -e "$UNIT" ]] || existing=1
 
-    if ((${#conflicts[@]})); then
-        printf 'These destination files already exist:\n'
-        printf '  %s\n' "${conflicts[@]}"
-        die "Move or back up these files manually, then rerun the installer."
-    fi
-
-    [[ ! -e "$UNIT" ]] ||
-        die "$UNIT already exists. Inspect it before replacing it."
-
-    say "Installing commands and Python scripts into $BIN_DIR"
-    for file in "${FILES[@]}"; do
-        install -m 0755 "$source_dir/$file" "$BIN_DIR/$file"
-    done
-
-    # Preserve a user-created config in the repository if present.
-    if [[ ! -e "$CONFIG" ]]; then
-        if [[ -f "$source_dir/display-notifications.json" ]]; then
-            install -m 0600 \
-                "$source_dir/display-notifications.json" "$CONFIG"
-            say "Installed repository notification configuration."
-        else
-            make_default_config
-        fi
+    if (( existing )); then
+        say "Existing installation detected."
+        confirm "Update installed application files and service?" ||
+            { say "Cancelled; nothing changed."; return 0; }
     else
-        say "Keeping existing configuration: $CONFIG"
+        say "Fresh installation."
     fi
 
-    # Validate JSON before enabling the service.
-    python3 -m json.tool "$CONFIG" >/dev/null ||
-        die "Invalid JSON in $CONFIG. Fix it and rerun installation."
+    if [[ -e "$CONFIG" ]]; then
+        printf '\nExisting configuration found: %s\n' "$CONFIG"
+        if confirm "Keep the existing notification configuration?"; then
+            keep_config=1
+        else
+            confirm "Replace it with the repository/default configuration?" ||
+                { say "Cancelled; nothing changed."; return 0; }
+        fi
+    fi
 
-    # Ensure the notification worker is compatible with this Python.
-    "$python_bin" -m py_compile "$BIN_DIR/display-notifications.py"
+    backup_dir="$HOME/abb9000display-backup-$(date +%Y%m%d-%H%M%S)"
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/abb9000display.XXXXXX")"
+    unit_stage="$stage/$SERVICE"
 
-    cat > "$UNIT" <<EOF
+    cleanup() { rm -rf "$stage"; }
+    trap cleanup RETURN
+
+    # Stage all application files before touching the installed version.
+    for file in "${FILES[@]}"; do
+        install -m 0755 "$source_dir/$file" "$stage/$file"
+    done
+
+    # Preserve the config when requested. Never replace saved message state.
+    if (( keep_config )); then
+        cp -a "$CONFIG" "$stage/display-notifications.json"
+    elif [[ -f "$source_dir/display-notifications.json" ]]; then
+        install -m 0600 "$source_dir/display-notifications.json" \
+            "$stage/display-notifications.json"
+    else
+        python3 - "$stage/display-notifications.json" <<'JSON'
+import json
+import sys
+config = {
+    "base_url": "https://ntfy.sh",
+    "poll_interval_seconds": 5,
+    "request_timeout_seconds": 10,
+    "state_file": "display-notifications-state.json",
+    "topics": []
+}
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+JSON
+        chmod 600 "$stage/display-notifications.json"
+    fi
+
+    # Validate staged files before stopping the running service.
+    python3 -m json.tool "$stage/display-notifications.json" >/dev/null ||
+        die "Staged configuration is invalid; installed files were not changed."
+
+    "$python_bin" -m py_compile "$stage/display-notifications.py" ||
+        die "Python validation failed; installed files were not changed."
+
+    cat > "$unit_stage" <<EOF
 [Unit]
 Description=ABB9000 display ntfy notifications worker
 After=network-online.target
@@ -155,29 +181,77 @@ UMask=0077
 [Install]
 WantedBy=default.target
 EOF
+    chmod 0644 "$unit_stage"
 
-    chmod 0644 "$UNIT"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        systemd-analyze --user verify "$unit_stage" ||
+            die "Service unit validation failed; installed files were not changed."
+    fi
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now "$SERVICE"
+    # Back up every installed file that may be replaced.
+    mkdir -p "$backup_dir"
+    for file in "${FILES[@]}"; do
+        [[ ! -e "$BIN_DIR/$file" ]] ||
+            cp -a "$BIN_DIR/$file" "$backup_dir/"
+    done
+    [[ ! -e "$UNIT" ]] || {
+        cp -a "$UNIT" "$backup_dir/"
+        had_unit=1
+    }
+    [[ ! -e "$CONFIG" ]] ||
+        cp -a "$CONFIG" "$backup_dir/"
+
+    # Preserve whether the service was running before the update.
+    if systemctl --user is-active --quiet "$SERVICE"; then
+        was_active=1
+    fi
+
+    if (( was_active || had_unit )); then
+        systemctl --user stop "$SERVICE" ||
+            die "Could not stop the service; installed files were not changed."
+    fi
+
+    # Install the validated application files.
+    for file in "${FILES[@]}"; do
+        install -m 0755 "$stage/$file" "$BIN_DIR/$file"
+    done
+
+    if (( ! keep_config )); then
+        install -m 0600 "$stage/display-notifications.json" "$CONFIG"
+    fi
+
+    install -m 0644 "$unit_stage" "$UNIT"
+
+    # Revalidate installed files before starting the service.
+    if ! "$python_bin" -m py_compile "$BIN_DIR/display-notifications.py" ||
+       ! python3 -m json.tool "$CONFIG" >/dev/null; then
+        warn "Post-install validation failed. Service will remain stopped."
+        warn "Backups are available at $backup_dir"
+        return 1
+    fi
+
+    systemctl --user daemon-reload ||
+        die "daemon-reload failed; service not restarted. Backup: $backup_dir"
+
+    if (( was_active )); then
+        systemctl --user enable "$SERVICE" &&
+            systemctl --user restart "$SERVICE" ||
+            die "Update installed, but service restart failed. Backup: $backup_dir"
+    else
+        systemctl --user enable "$SERVICE" ||
+            die "Could not enable service. Backup: $backup_dir"
+        if (( ! had_unit )); then
+            systemctl --user start "$SERVICE" ||
+                die "Install complete, but service start failed. Backup: $backup_dir"
+        fi
+    fi
 
     install_path_hint
-
-    say "Installation complete."
-    printf '\nCommands installed:\n'
-    printf '  display\n'
-    printf '  display-pattern\n'
-    printf '  python3 %s/test_segment.py\n' "$BIN_DIR"
-    printf '  python3 %s/test_segments.py\n' "$BIN_DIR"
-    printf '\nNotification service:\n'
-    printf '  systemctl --user status %s\n' "$SERVICE"
-    printf '  journalctl --user -u %s -f\n' "$SERVICE"
-    printf '\nConfiguration:\n  %s\n' "$CONFIG"
-    printf '\nEdit the config and add your ntfy topics/actions to enable notifications.\n'
-    printf 'The service starts with an empty topic list until you configure it.\n'
-    printf 'After changing the config, restart it with:\n'
-    printf '  systemctl --user restart %s\n' "$SERVICE"
-    printf '\nOpen a new shell session for PATH changes to take effect.\n'
+    say "Installation/update complete."
+    say "Configuration: $CONFIG"
+    say "Saved state preserved: $STATE"
+    say "Backup: $backup_dir"
+    systemctl --user status "$SERVICE" --no-pager || true
 }
 
 uninstall_app() {
