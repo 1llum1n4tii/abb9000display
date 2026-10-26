@@ -2,6 +2,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import signal
 import time
 import RPi.GPIO as GPIO
 
@@ -197,6 +198,11 @@ def main():
 
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
+
+    def handle_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
 
     try:
         print(
