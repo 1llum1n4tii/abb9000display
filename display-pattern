@@ -1,5 +1,5 @@
 
-#!/bin/zsh
+#!/usr/bin/env zsh
 
 # Find displaypattern.py beside this wrapper.
 SCRIPT_DIR="${0:A:h}"
@@ -8,25 +8,26 @@ LOG_FILE="/tmp/displaypattern.log"
 
 stop_pid() {
     local pid="$1"
+    kill -0 "$pid" 2>/dev/null || return 0
 
-    if ! kill -0 "$pid" 2>/dev/null; then
-        return 0
-    fi
+    print -- "Stopping animation process $pid..."
+    kill -TERM "$pid" 2>/dev/null || true
 
-    print -u2 -- "Stopping animation process $pid..."
-    kill -INT "$pid" || return 1
-
-    # Wait up to 5 seconds for graceful GPIO cleanup.
     local i
-    for i in {1..50}; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
+    for i in {1..5}; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
     done
 
-    print -u2 -- "ERROR: PID $pid did not exit within 5 seconds."
-    print -u2 -- "Not sending SIGKILL."
+    print -u2 -- "PID $pid did not exit after SIGTERM; trying SIGINT."
+    kill -INT "$pid" 2>/dev/null || true
+
+    for i in {1..3}; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1
+    done
+
+    print -u2 -- "ERROR: PID $pid did not exit. Not sending SIGKILL."
     return 1
 }
 
@@ -37,7 +38,6 @@ if [[ "$1" == "--killall" ]]; then
         exit 2
     fi
 
-    PIDS=("${@f}")  # replaced below
     PIDS=("${(@f)$(pgrep -f '[p]ython.*displaypattern\.py' || true)}")
     failed=0
 
@@ -50,8 +50,7 @@ if [[ "$1" == "--killall" ]]; then
         print -u2 -- "ERROR: One or more animation processes failed to stop."
         exit 1
     fi
-
-    print -u2 -- "All matching animation processes stopped."
+    exit 0
     exit 0
 fi
 
