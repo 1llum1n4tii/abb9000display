@@ -107,6 +107,34 @@ def fetch_messages(base_url, topic, cursor, timeout):
         return events
 
 
+
+def stream_messages(base_url, topic, cursor, timeout):
+    """Yield events from a persistent ntfy JSON stream."""
+    params = {}
+    if cursor:
+        params["since"] = cursor
+    else:
+        params["since"] = "latest"
+    url = f"{base_url.rstrip('/')}/{topic}/json?{urlencode(params)}"
+    request = Request(
+        url,
+        headers={"User-Agent": "abb9000display-notifications/1.0"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        for line in response:
+            if STOP.is_set():
+                return
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("Ignoring invalid JSON from topic %s", topic)
+                continue
+            if isinstance(event, dict):
+                yield event
+
+
 def message_environment(event):
     """Expose notification fields to commands as environment variables."""
     env = os.environ.copy()
@@ -183,6 +211,8 @@ class NotificationWorker:
         self.delayed = []
         self.sequence = 0
         self.reset_keys = {}
+        self.state_lock = threading.RLock()
+        self.action_lock = threading.RLock()
 
     def persist_state(self):
         save_json_atomic(self.state_path, self.state)
@@ -252,70 +282,101 @@ class NotificationWorker:
 
         self.schedule_delayed(topic_config, event)
 
-    def poll_topic(self, topic_config):
+    def stream_topic(self, topic_config):
         topic = topic_config["topic"]
-        cursor = self.state.get(topic)
+        delay = 1.0
 
-        try:
-            events = fetch_messages(
-                self.base_url, topic, cursor, self.timeout
-            )
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            log.warning("Polling topic %s failed: %s", topic, exc)
-            return
-        except Exception:
-            log.exception("Unexpected error polling topic %s", topic)
-            return
+        while not STOP.is_set():
+            try:
+                with self.state_lock:
+                    cursor = self.state.get(topic)
 
-        # First run: establish a baseline and do not trigger cached messages.
-        if cursor is None:
-            message_events = [
-                e for e in events
-                if e.get("event") == "message" and e.get("id")
-            ]
-            if message_events:
-                self.state[topic] = message_events[-1]["id"]
-                self.persist_state()
-            log.info("Initialized baseline for topic %s", topic)
-            return
+                # Establish a baseline once, without triggering old messages.
+                if cursor is None:
+                    events = fetch_messages(
+                        self.base_url, topic, None, self.timeout
+                    )
+                    messages = [
+                        e for e in events
+                        if e.get("event") == "message" and e.get("id")
+                    ]
+                    with self.state_lock:
+                        if topic not in self.state and messages:
+                            self.state[topic] = messages[-1]["id"]
+                            self.persist_state()
+                        cursor = self.state.get(topic)
+                    log.info("Initialized baseline for topic %s", topic)
 
-        changed = False
-        for event in events:
-            if event.get("event") != "message" or not event.get("id"):
-                continue
+                # A persistent connection; resume from the saved message ID.
+                for event in stream_messages(
+                    self.base_url, topic, cursor, max(self.timeout, 60)
+                ):
+                    if STOP.is_set():
+                        return
+                    if event.get("event") != "message" or not event.get("id"):
+                        continue
 
-            # ntfy returns messages in chronological order.
-            self.handle_message(topic_config, event)
-            self.state[topic] = event["id"]
-            changed = True
+                    with self.state_lock:
+                        if event["id"] == self.state.get(topic):
+                            continue
+                        with self.action_lock:
+                            self.handle_message(topic_config, event)
+                        self.state[topic] = event["id"]
+                        self.persist_state()
 
-        if changed:
-            self.persist_state()
+                    cursor = event["id"]
+                    delay = 1.0
+
+                if not STOP.is_set():
+                    raise ConnectionError("ntfy stream ended")
+
+            except (HTTPError, URLError, TimeoutError, OSError,
+                    ConnectionError) as exc:
+                if STOP.is_set():
+                    return
+                log.warning("Stream for topic %s failed: %s", topic, exc)
+            except Exception:
+                log.exception("Unexpected stream error for topic %s", topic)
+
+            STOP.wait(delay)
+            delay = min(delay * 2, 30.0)
 
     def run(self):
         log.info(
-            "Starting notification worker: %d topic(s), poll interval %.1fs",
+            "Starting notification worker: %d topic(s), persistent streams",
             len(self.topics),
-            self.interval,
         )
 
+        seen = set()
         for topic_config in self.topics:
             topic = topic_config.get("topic")
             if not isinstance(topic, str) or not topic.strip():
                 raise ValueError("Every topic requires a non-empty 'topic'")
+            if topic in seen:
+                raise ValueError("Duplicate topic configured: " + topic)
+            seen.add(topic)
 
-        while not STOP.is_set():
-            started = time.monotonic()
+        workers = [
+            threading.Thread(
+                target=self.stream_topic,
+                args=(topic_config,),
+                name="ntfy-" + topic_config["topic"],
+                daemon=True,
+            )
+            for topic_config in self.topics
+        ]
+        for worker in workers:
+            worker.start()
 
-            for topic_config in self.topics:
-                if STOP.is_set():
-                    break
-                self.poll_topic(topic_config)
-
-            self.run_due_actions()
-
-            elapsed = time.monotonic() - started
-            STOP.wait(max(0, self.interval - elapsed))
+        try:
+            while not STOP.is_set():
+                with self.action_lock:
+                    self.run_due_actions()
+                STOP.wait(0.25)
+        finally:
+            STOP.set()
+            for worker in workers:
+                worker.join(timeout=2)
 
         log.info("Notification worker stopped.")
 
